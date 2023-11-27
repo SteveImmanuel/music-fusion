@@ -1,0 +1,15 @@
+{
+    "python.analysis.autoImportCompletions": false,
+    "python.analysis.typeCheckingMode": "basic",
+    "[python]": {
+        "editor.formatOnSave": false,
+        "editor.defaultFormatter": "eeyore.yapf"
+    },
+    "yapf.args": [
+        "--style",
+        "{indent_width: 4, column_limit: 130}"
+    ],
+    "editor.rulers": [
+        130
+    ],
+}
