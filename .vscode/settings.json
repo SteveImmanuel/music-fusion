@@ -1,6 +1,6 @@
 {
     "python.analysis.autoImportCompletions": false,
-    "python.analysis.typeCheckingMode": "basic",
+    "python.analysis.typeCheckingMode": "off",
     "[python]": {
         "editor.formatOnSave": false,
         "editor.defaultFormatter": "eeyore.yapf"

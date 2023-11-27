@@ -33,6 +33,7 @@ class AudioDataset(torch.utils.data.Dataset):
     |------- samples -------------------|
     |---------------------|-- outputs --|
     """
+
     def __init__(self, root_dir: str, sample_rate: int = 16000, receptive_field: int = 1024, mu: int = 255):
         super().__init__()
 
@@ -52,7 +53,7 @@ class AudioDataset(torch.utils.data.Dataset):
         lbl_idx = 0
         for label in os.listdir(self.root_dir):
             self.idx2lbl[lbl_idx] = label
-            
+
             label_dir = os.path.join(self.root_dir, label)
             for file_name in os.listdir(label_dir):
                 ext = file_name.split('.')[-1].lower()
@@ -64,14 +65,13 @@ class AudioDataset(torch.utils.data.Dataset):
                 encoded_wav = mu_law_encode(wav)
                 self.data.append((lbl_idx, encoded_wav))
                 self.data_len.append(len(encoded_wav) - self.receptive_field)
-            
-            lbl_idx += 1
 
+            lbl_idx += 1
 
     def __len__(self):
         return sum(self.data_len)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int):
         file_idx = 0
         while idx >= self.data_len[file_idx]:
             idx -= self.data_len[file_idx]
@@ -80,7 +80,7 @@ class AudioDataset(torch.utils.data.Dataset):
         lbl_idx = self.data[file_idx][0]
         wav_in = self.data[file_idx][1][idx:idx + self.receptive_field]
         wav_out = self.data[file_idx][1][idx + self.receptive_field]
-        
+
         wav_in = torch.from_numpy(wav_in).long()
         wav_out = torch.tensor(wav_out).long()
 
