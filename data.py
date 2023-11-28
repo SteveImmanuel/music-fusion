@@ -42,6 +42,7 @@ class AudioDataset(torch.utils.data.Dataset):
         self.root_dir = root_dir
         self.sample_rate = sample_rate
         self.receptive_field = receptive_field
+        self.mu = mu
 
         self._load_all_data()
 
@@ -62,7 +63,7 @@ class AudioDataset(torch.utils.data.Dataset):
 
                 file_path = os.path.join(label_dir, file_name)
                 wav, _ = librosa.load(file_path, sr=self.sample_rate)
-                encoded_wav = mu_law_encode(wav)
+                encoded_wav = mu_law_encode(wav, self.mu)
                 self.data.append((lbl_idx, encoded_wav))
                 self.data_len.append(len(encoded_wav) - self.receptive_field)
 
@@ -81,7 +82,8 @@ class AudioDataset(torch.utils.data.Dataset):
         wav_in = self.data[file_idx][1][idx:idx + self.receptive_field]
         wav_out = self.data[file_idx][1][idx + self.receptive_field]
 
-        wav_in = torch.from_numpy(wav_in).long()
+        wav_in = torch.from_numpy(wav_in) / self.mu
+        wav_in = wav_in.unsqueeze(0)
         wav_out = torch.tensor(wav_out).long()
 
         return lbl_idx, wav_in, wav_out
