@@ -43,6 +43,7 @@ class AudioDataset(torch.utils.data.Dataset):
         self.sample_rate = sample_rate
         self.receptive_field = receptive_field
         self.mu = mu
+        self.override_file_idx = None
 
         self._load_all_data()
 
@@ -68,17 +69,25 @@ class AudioDataset(torch.utils.data.Dataset):
                 self.data_len.append(len(encoded_wav) - self.receptive_field)
 
             lbl_idx += 1
+    
+    def set_override_file_idx(self, file_idx: int):
+        self.override_file_idx = file_idx
 
     def __len__(self):
+        if self.override_file_idx is not None:
+            return self.data_len[self.override_file_idx]
         return sum(self.data_len)
 
     def __getitem__(self, idx: int):
-        file_idx = 0
-        while idx >= self.data_len[file_idx]:
-            idx -= self.data_len[file_idx]
-            file_idx += 1
+        if self.override_file_idx is not None:
+            file_idx = self.override_file_idx
+        else:
+            file_idx = 0
+            while idx >= self.data_len[file_idx]:
+                idx -= self.data_len[file_idx]
+                file_idx += 1
 
-        lbl_idx = self.data[file_idx][0]
+        lbl_idx = torch.LongTensor([self.data[file_idx][0]]).squeeze()
         wav_in = self.data[file_idx][1][idx:idx + self.receptive_field]
         wav_out = self.data[file_idx][1][idx + self.receptive_field]
 
@@ -87,7 +96,6 @@ class AudioDataset(torch.utils.data.Dataset):
         wav_out = torch.tensor(wav_out).long()
 
         return lbl_idx, wav_in, wav_out
-
 
 if __name__ == "__main__":
     # data = [0, -1, 1, -2**15, 2**15 - 1]
