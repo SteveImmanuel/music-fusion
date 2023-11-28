@@ -1,9 +1,15 @@
 import logging
 import torch
 import torch.nn.functional as F
+import pytorch_lightning as pl
+
+from typing import Any
+from pytorch_lightning.utilities.types import STEP_OUTPUT
+from hyp import *
 
 logger = logging.getLogger('Model')
 logging.basicConfig(level=logging.INFO)
+
 
 class CausalConv1d(torch.nn.Conv1d):
 
@@ -27,7 +33,6 @@ class WaveNetLayer(torch.nn.Module):
 
     def forward(self, x):
         dilated_out = self.dilated_conv(x)
-        # gated = F.tanh(dilated_out[:, :dilated_out.shape[1] // 2, :]) * F.sigmoid(dilated_out[:, dilated_out.shape[1] // 2:, :])
         gated = F.tanh(dilated_out) * F.sigmoid(dilated_out)
         residual_out = self.residual(gated)
         skip_out = self.skip(gated)
@@ -63,51 +68,199 @@ class WaveNet(torch.nn.Module):
         self.end_conv_1 = torch.nn.Conv1d(skip_channels, skip_channels, kernel_size=1)
         self.end_conv_2 = torch.nn.Conv1d(skip_channels, num_classes, kernel_size=1)
 
+        self.bn1 = torch.nn.BatchNorm1d(skip_channels)
+        self.bn2 = torch.nn.BatchNorm1d(skip_channels)
+        self.embedding = torch.nn.Embedding(2, self.receptive_field)
+
     @property
     def receptive_field(self):
         return 1024
 
-    def forward(self, x):
-        logger.debug(f'input {x.shape}')
-        x = self.start_conv(x)
-        logger.debug(f'after start_conv {x.shape}')
+    def forward(self, lbl_idx, wav_in):
+        x = self.start_conv(wav_in)
+        latent = self.embedding(lbl_idx).unsqueeze(1).expand(-1, self.skip_channels, -1)
 
         skip_connections = []
-        for i in range(self.num_layers * self.num_stacks):
-            x, skip = self.layers[i](x)
-            logger.debug(f'residual {i} {x.shape}')
-            logger.debug(f'skip {i} {skip.shape}')
+        for layer in self.layers:
+            x, skip = layer(x)
             skip_connections.append(skip)
 
         out = torch.stack(skip_connections, dim=0)
-        logger.debug(f'skip {out.shape}')
         out = torch.sum(out, dim=0)
-        logger.debug(f'skip pool {out.shape}')
-        
+
         out = F.relu(out)
+
+        out = out + latent
+        out = self.bn1(out)
         out = self.end_conv_1(out)
         out = F.relu(out)
+
+        out = self.bn2(out)
         out = self.end_conv_2(out)
         # softmax is handled by the loss function
-        logger.debug(f'output {out.shape}')
+        out = out[:, :, -1]
+        return out
+    
+    def forward_fusion(self, wav_in):
+        batch_size = len(wav_in)
+        lbl_idx_ones = torch.ones(batch_size, dtype=torch.long).to(wav_in.device)
+        lbl_idx_zeros = torch.zeros(batch_size, dtype=torch.long).to(wav_in.device)
+        x = self.start_conv(wav_in)
+        latent_zero = self.embedding(lbl_idx_zeros).unsqueeze(1).expand(-1, self.skip_channels, -1)
+        latent_one = self.embedding(lbl_idx_ones).unsqueeze(1).expand(-1, self.skip_channels, -1)
+        latent = latent_zero + latent_one
+        # latent = latent / 2
+
+        skip_connections = []
+        for layer in self.layers:
+            x, skip = layer(x)
+            skip_connections.append(skip)
+
+        out = torch.stack(skip_connections, dim=0)
+        out = torch.sum(out, dim=0)
+
+        out = F.relu(out)
+
+        out = out + latent
+        out = self.bn1(out)
+        out = self.end_conv_1(out)
+        out = F.relu(out)
+
+        out = self.bn2(out)
+        out = self.end_conv_2(out)
+        # softmax is handled by the loss function
+        out = out[:, :, -1]
+        return out
+    
+    def forward_deep_fusion(self, wav1_in, wav2_in):
+        batch_size = len(wav1_in)
+        lbl_idx_ones = torch.ones(batch_size, dtype=torch.long).to(wav1_in.device)
+        lbl_idx_zeros = torch.zeros(batch_size, dtype=torch.long).to(wav1_in.device)
+        latent_zero = self.embedding(lbl_idx_zeros).unsqueeze(1).expand(-1, self.skip_channels, -1)
+        latent_one = self.embedding(lbl_idx_ones).unsqueeze(1).expand(-1, self.skip_channels, -1)
+        latent = latent_zero + latent_one
+
+        x1 = self.start_conv(wav1_in)
+        x2 = self.start_conv(wav2_in)
+
+        skip_connections = []
+        skip_connections1 = []
+        skip_connections2 = []
+        for layer in self.layers:
+            x1, skip1 = layer(x1)
+            skip_connections1.append(skip1)
+
+            x2, skip2 = layer(x2)
+            skip_connections2.append(skip2)
+
+            x = x1 + x2
+            x, skip = layer(x)
+            skip_connections.append(skip)
+
+        out = torch.stack(skip_connections + skip_connections1 + skip_connections2, dim=0)
+        out = torch.sum(out, dim=0)
+
+        out = F.relu(out)
+
+        out = out + latent
+        out = self.bn1(out)
+        out = self.end_conv_1(out)
+        out = F.relu(out)
+
+        out = self.bn2(out)
+        out = self.end_conv_2(out)
+        # softmax is handled by the loss function
         out = out[:, :, -1]
         return out
 
-    # def generate(self, x, num_samples):
-    #     x = self.start_conv(x)
-    #     skip_connections = []
-    #     for i in range(self.num_layers * self.num_stacks):
-    #         x, skip = self.layers[i](x)
-    #         skip_connections.append(skip)
-    #     x = sum(skip_connections)
-    #     x = F.relu(x)
-    #     x = self.end_conv_1(x)
-    #     x = F.relu(x)
-    #     x = self.end_conv_2(x)
-    #     x = x[:, :, -1]
-    #     x = F.softmax(x, dim=1)
-    #     x = torch.multinomial(x, num_samples=num_samples)
-    #     return x
+class WaveNetPl(pl.LightningModule):
+
+    def __init__(self, model: WaveNet):
+        super().__init__()
+        self.model = model
+        # self.training_step_outputs = []
+        # self.validation_step_outputs = []
+
+    def _calculate_acc(self, y_hat, y):
+        y_hat = torch.argmax(y_hat, dim=1)
+        return torch.sum(y_hat == y).item() / len(y)
+
+    def _calculate_acc_raw(self, y_hat, y):
+        y_hat = torch.argmax(y_hat, dim=1)
+        return torch.sum(y_hat == y).item(), len(y)
+
+    def training_step(self, batch: torch.Tensor, batch_idx: int) -> STEP_OUTPUT:
+        self.model.train()
+        lbl_idx, wav_in, wav_out = batch
+        pred = self.model(lbl_idx, wav_in)
+        loss = F.cross_entropy(pred, wav_out)
+        acc = self._calculate_acc(pred, wav_out)
+        self.log('train/batch_loss', loss, sync_dist=True)
+        self.log('train/batch_acc', acc, sync_dist=True)
+        # self.training_step_outputs.append({'loss': loss, 'pred': pred, 'target': wav_out})
+        return loss
+
+    def validation_step(self, batch: torch.Tensor, batch_idx: int) -> STEP_OUTPUT:
+        self.model.eval()
+        lbl_idx, wav_in, wav_out = batch
+        with torch.no_grad():
+            pred = self.model(lbl_idx, wav_in)
+        loss = F.cross_entropy(pred, wav_out)
+        acc = self._calculate_acc(pred, wav_out)
+        self.log('val/batch_loss', loss, sync_dist=True)
+        self.log('val/batch_acc', acc, sync_dist=True)
+        # self.validation_step_outputs.append({'loss': loss, 'pred': pred, 'target': wav_out})
+        return loss
+
+    # def on_train_epoch_end(self) -> None:
+    #     outputs = self.training_step_outputs
+    #     total_correct = 0
+    #     total_data = 0
+    #     total_loss = 0
+    #     for output in outputs:
+    #         b_correct, b_data = self._calculate_acc_raw(output['pred'], output['target'])
+    #         total_correct += b_correct
+    #         total_data += b_data
+    #         total_loss += output['loss']
+
+    #     self.log('train/acc', total_correct / total_data, prog_bar=True, sync_dist=True)
+    #     self.log('train/loss', total_loss / len(outputs), prog_bar=True, sync_dist=True)
+    #     self.training_step_outputs.clear()
+
+    # def on_validation_epoch_end(self) -> None:
+    #     outputs = self.validation_step_outputs
+    #     total_correct = 0
+    #     total_data = 0
+    #     total_loss = 0
+    #     for output in outputs:
+    #         b_correct, b_data = self._calculate_acc_raw(output['pred'], output['target'])
+    #         total_correct += b_correct
+    #         total_data += b_data
+    #         total_loss += output['loss']
+
+    #     self.log('val/acc', total_correct / total_data, prog_bar=True, sync_dist=True)
+    #     self.log('val/loss', total_loss / len(outputs), prog_bar=True, sync_dist=True)
+    #     self.validation_step_outputs.clear()
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=LR)
+        return {
+            'optimizer': optimizer,
+            'lr_scheduler': {
+                'scheduler':
+                torch.optim.lr_scheduler.ReduceLROnPlateau(
+                    optimizer,
+                    mode='min',
+                    factor=LR_DECAY_FACTOR,
+                    patience=LR_DECAY_PATIENCE,
+                    min_lr=LR_MIN,
+                ),
+                'monitor':
+                'train/batch_loss',
+                'frequency':
+                1,
+            },
+        }
 
 
 if __name__ == '__main__':
